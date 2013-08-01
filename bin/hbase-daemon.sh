@@ -33,7 +33,7 @@
 # Modelled after $HADOOP_HOME/bin/hadoop-daemon.sh
 
 usage="Usage: hbase-daemon.sh [--config <conf-dir>]\
- (start|stop) <hbase-command> \
+ (start|stop|restart) <hbase-command> \
  <args...>"
 
 # if no args specified, show usage
@@ -42,8 +42,8 @@ if [ $# -le 1 ]; then
   exit 1
 fi
 
-bin=`dirname "$0"`
-bin=`cd "$bin"; pwd`
+bin=`dirname "${BASH_SOURCE-$0}"`
+bin=`cd "$bin">/dev/null; pwd`
 
 . "$bin"/hbase-config.sh
 
@@ -64,16 +64,30 @@ hbase_rotate_log ()
     if [ -f "$log" ]; then # rotate logs
     while [ $num -gt 1 ]; do
         prev=`expr $num - 1`
-        [ -f "$log.$prev" ] && mv "$log.$prev" "$log.$num"
+        [ -f "$log.$prev" ] && mv -f "$log.$prev" "$log.$num"
         num=$prev
     done
-    mv "$log" "$log.$num";
+    mv -f "$log" "$log.$num";
     fi
 }
 
-if [ -f "${HBASE_CONF_DIR}/hbase-env.sh" ]; then
-  . "${HBASE_CONF_DIR}/hbase-env.sh"
-fi
+wait_until_done ()
+{
+    p=$1
+    cnt=${HBASE_SLAVE_TIMEOUT:-300}
+    origcnt=$cnt
+    while kill -0 $p > /dev/null 2>&1; do
+      if [ $cnt -gt 1 ]; then
+        cnt=`expr $cnt - 1`
+        sleep 1
+      else
+        echo "Process did not complete after $origcnt seconds, killing."
+        kill -9 $p
+        exit 1
+      fi
+    done
+    return 0
+}
 
 # get log directory
 if [ "$HBASE_LOG_DIR" = "" ]; then
@@ -89,11 +103,32 @@ if [ "$HBASE_IDENT_STRING" = "" ]; then
   export HBASE_IDENT_STRING="$USER"
 fi
 
-# some variables
-export HBASE_LOGFILE=hbase-$HBASE_IDENT_STRING-$command-$HOSTNAME.log
+# Some variables
+# Work out java location so can print version into log.
+if [ "$JAVA_HOME" != "" ]; then
+  #echo "run java in $JAVA_HOME"
+  JAVA_HOME=$JAVA_HOME
+fi
+if [ "$JAVA_HOME" = "" ]; then
+  echo "Error: JAVA_HOME is not set."
+  exit 1
+fi
+JAVA=$JAVA_HOME/bin/java
+export HBASE_LOG_PREFIX=hbase-$HBASE_IDENT_STRING-$command-$HOSTNAME
+export HBASE_LOGFILE=$HBASE_LOG_PREFIX.log
 export HBASE_ROOT_LOGGER="INFO,DRFA"
-log=$HBASE_LOG_DIR/hbase-$HBASE_IDENT_STRING-$command-$HOSTNAME.out  
+export HBASE_SECURITY_LOGGER="INFO,DRFAS"
+logout=$HBASE_LOG_DIR/$HBASE_LOG_PREFIX.out  
+loggc=$HBASE_LOG_DIR/$HBASE_LOG_PREFIX.gc
+loglog="${HBASE_LOG_DIR}/${HBASE_LOGFILE}"
 pid=$HBASE_PID_DIR/hbase-$HBASE_IDENT_STRING-$command.pid
+
+if [ -n "$SERVER_GC_OPTS" ]; then
+  export SERVER_GC_OPTS=${SERVER_GC_OPTS/"-Xloggc:<FILE-PATH>"/"-Xloggc:${loggc}"}
+fi
+if [ -n "$CLIENT_GC_OPTS" ]; then
+  export CLIENT_GC_OPTS=${CLIENT_GC_OPTS/"-Xloggc:<FILE-PATH>"/"-Xloggc:${loggc}"}
+fi
 
 # Set default scheduling priority
 if [ "$HBASE_NICENESS" = "" ]; then
@@ -111,37 +146,55 @@ case $startStop in
       fi
     fi
 
-    hbase_rotate_log $log
-    echo starting $command, logging to $log
+    hbase_rotate_log $logout
+    hbase_rotate_log $loggc
+    echo starting $command, logging to $logout
+    # Add to the command log file vital stats on our environment.
+    echo "`date` Starting $command on `hostname`" >> $loglog
+    echo "`ulimit -a`" >> $loglog 2>&1
     nohup nice -n $HBASE_NICENESS "$HBASE_HOME"/bin/hbase \
         --config "${HBASE_CONF_DIR}" \
-        $command $startStop "$@" > "$log" 2>&1 < /dev/null &
+        $command "$@" $startStop > "$logout" 2>&1 < /dev/null &
     echo $! > $pid
-    sleep 1; head "$log"
+    sleep 1; head "$logout"
     ;;
 
   (stop)
     if [ -f $pid ]; then
+      # kill -0 == see if the PID exists 
       if kill -0 `cat $pid` > /dev/null 2>&1; then
         echo -n stopping $command
-        if [ "$command" = "master" ]; then
-          nohup nice -n $HBASE_NICENESS "$HBASE_HOME"/bin/hbase \
-              --config "${HBASE_CONF_DIR}" \
-              $command $startStop "$@" > "$log" 2>&1 < /dev/null &
-        else
-          kill `cat $pid` > /dev/null 2>&1
-        fi
+        echo "`date` Terminating $command" >> $loglog
+        kill `cat $pid` > /dev/null 2>&1
         while kill -0 `cat $pid` > /dev/null 2>&1; do
           echo -n "."
           sleep 1;
         done
+        rm $pid
         echo
       else
-        echo no $command to stop
+        retval=$?
+        echo no $command to stop because kill -0 of pid `cat $pid` failed with status $retval
       fi
     else
-      echo no $command to stop
+      echo no $command to stop because no pid file $pid
     fi
+    ;;
+
+  (restart)
+    thiscmd=$0
+    args=$@
+    # stop the command
+    $thiscmd --config "${HBASE_CONF_DIR}" stop $command $args &
+    wait_until_done $!
+    # wait a user-specified sleep period
+    sp=${HBASE_RESTART_SLEEP:-3}
+    if [ $sp -gt 0 ]; then
+      sleep $sp
+    fi
+    # start the command
+    $thiscmd --config "${HBASE_CONF_DIR}" start $command $args &
+    wait_until_done $!
     ;;
 
   (*)

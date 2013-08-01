@@ -26,18 +26,30 @@
 # Run this on master node.
 usage="Usage: start-hbase.sh"
 
-bin=`dirname "$0"`
-bin=`cd "$bin"; pwd`
+bin=`dirname "${BASH_SOURCE-$0}"`
+bin=`cd "$bin">/dev/null; pwd`
 
 . "$bin"/hbase-config.sh
 
 # start hbase daemons
-# TODO: PUT BACK !!! "${HADOOP_HOME}"/bin/hadoop dfsadmin -safemode wait
 errCode=$?
 if [ $errCode -ne 0 ]
 then
   exit $errCode
 fi
-"$bin"/hbase-daemon.sh --config "${HBASE_CONF_DIR}" start master 
-"$bin"/hbase-daemons.sh --config "${HBASE_CONF_DIR}" \
-  --hosts "${HBASE_REGIONSERVERS}" start regionserver
+
+# HBASE-6504 - only take the first line of the output in case verbose gc is on
+distMode=`$bin/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
+
+
+if [ "$distMode" == 'false' ] 
+then
+  "$bin"/hbase-daemon.sh start master
+else
+  "$bin"/hbase-daemons.sh --config "${HBASE_CONF_DIR}" start zookeeper
+  "$bin"/hbase-daemon.sh --config "${HBASE_CONF_DIR}" start master 
+  "$bin"/hbase-daemons.sh --config "${HBASE_CONF_DIR}" \
+    --hosts "${HBASE_REGIONSERVERS}" start regionserver
+  "$bin"/hbase-daemons.sh --config "${HBASE_CONF_DIR}" \
+    --hosts "${HBASE_BACKUP_MASTERS}" start master-backup
+fi

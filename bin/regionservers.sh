@@ -41,8 +41,8 @@ if [ $# -le 0 ]; then
   exit 1
 fi
 
-bin=`dirname "$0"`
-bin=`cd "$bin"; pwd`
+bin=`dirname "${BASH_SOURCE-$0}"`
+bin=`cd "$bin">/dev/null; pwd`
 
 . "$bin"/hbase-config.sh
 
@@ -50,10 +50,6 @@ bin=`cd "$bin"; pwd`
 # then it takes precedence over the definition in 
 # hbase-env.sh. Save it here.
 HOSTLIST=$HBASE_REGIONSERVERS
-
-if [ -f "${HBASE_CONF_DIR}/hbase-env.sh" ]; then
-  . "${HBASE_CONF_DIR}/hbase-env.sh"
-fi
 
 if [ "$HOSTLIST" = "" ]; then
   if [ "$HBASE_REGIONSERVERS" = "" ]; then
@@ -64,11 +60,16 @@ if [ "$HOSTLIST" = "" ]; then
 fi
 
 for regionserver in `cat "$HOSTLIST"`; do
- ssh $HBASE_SSH_OPTS $regionserver $"${@// /\\ }" \
-   2>&1 | sed "s/^/$regionserver: /" &
- if [ "$HBASE_SLAVE_SLEEP" != "" ]; then
-   sleep $HBASE_SLAVE_SLEEP
- fi
+  if ${HBASE_SLAVE_PARALLEL:-true}; then 
+    ssh $HBASE_SSH_OPTS $regionserver $"${@// /\\ }" \
+      2>&1 | sed "s/^/$regionserver: /" &
+  else # run each command serially 
+    ssh $HBASE_SSH_OPTS $regionserver $"${@// /\\ }" \
+      2>&1 | sed "s/^/$regionserver: /"
+  fi
+  if [ "$HBASE_SLAVE_SLEEP" != "" ]; then
+    sleep $HBASE_SLAVE_SLEEP
+  fi
 done
 
 wait

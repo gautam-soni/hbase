@@ -32,11 +32,24 @@ if [ $# -le 1 ]; then
   exit 1
 fi
 
-bin=`dirname "$0"`
-bin=`cd "$bin"; pwd`
+bin=`dirname "${BASH_SOURCE-$0}"`
+bin=`cd "$bin">/dev/null; pwd`
 
 . $bin/hbase-config.sh
 
-exec "$bin/regionservers.sh" --config "${HBASE_CONF_DIR}" \
- cd "${HBASE_HOME}" \; \
- "$bin/hbase-daemon.sh" --config "${HBASE_CONF_DIR}" "$@"
+remote_cmd="cd ${HBASE_HOME}; $bin/hbase-daemon.sh --config ${HBASE_CONF_DIR} $@"
+args="--hosts ${HBASE_REGIONSERVERS} --config ${HBASE_CONF_DIR} $remote_cmd"
+
+command=$2
+case $command in
+  (zookeeper)
+    exec "$bin/zookeepers.sh" $args
+    ;;
+  (master-backup)
+    exec "$bin/master-backup.sh" $args
+    ;;
+  (*)
+    exec "$bin/regionservers.sh" $args
+    ;;
+esac
+

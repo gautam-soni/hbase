@@ -24,9 +24,50 @@
 
 # Stop hadoop hbase daemons.  Run this on master node.
 
-bin=`dirname "$0"`
-bin=`cd "$bin"; pwd`
+bin=`dirname "${BASH_SOURCE-$0}"`
+bin=`cd "$bin">/dev/null; pwd`
 
 . "$bin"/hbase-config.sh
 
-"$bin"/hbase-daemon.sh --config "${HBASE_CONF_DIR}" stop master
+# variables needed for stop command
+if [ "$HBASE_LOG_DIR" = "" ]; then
+  export HBASE_LOG_DIR="$HBASE_HOME/logs"
+fi
+mkdir -p "$HBASE_LOG_DIR"
+
+if [ "$HBASE_IDENT_STRING" = "" ]; then
+  export HBASE_IDENT_STRING="$USER"
+fi
+
+export HBASE_LOG_PREFIX=hbase-$HBASE_IDENT_STRING-master-$HOSTNAME
+export HBASE_LOGFILE=$HBASE_LOG_PREFIX.log
+logout=$HBASE_LOG_DIR/$HBASE_LOG_PREFIX.out  
+loglog="${HBASE_LOG_DIR}/${HBASE_LOGFILE}"
+pid=${HBASE_PID_DIR:-/tmp}/hbase-$HBASE_IDENT_STRING-master.pid
+
+echo -n stopping hbase
+echo "`date` Stopping hbase (via master)" >> $loglog
+
+nohup nice -n ${HBASE_NICENESS:-0} "$HBASE_HOME"/bin/hbase \
+   --config "${HBASE_CONF_DIR}" \
+   master stop "$@" > "$logout" 2>&1 < /dev/null &
+
+while kill -0 `cat $pid` > /dev/null 2>&1; do
+  echo -n "."
+  sleep 1;
+done
+# Add a CR after we're done w/ dots.
+echo
+
+# distributed == false means that the HMaster will kill ZK when it exits
+# HBASE-6504 - only take the first line of the output in case verbose gc is on
+distMode=`$bin/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
+if [ "$distMode" == 'true' ] 
+then
+  # TODO: store backup masters in ZooKeeper and have the primary send them a shutdown message
+  # stop any backup masters
+  "$bin"/hbase-daemons.sh --config "${HBASE_CONF_DIR}" \
+    --hosts "${HBASE_BACKUP_MASTERS}" stop master-backup
+
+  "$bin"/hbase-daemons.sh --config "${HBASE_CONF_DIR}" stop zookeeper
+fi
